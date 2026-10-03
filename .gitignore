@@ -1,0 +1,4 @@
+# Encryption / signing keys generated on first run
+admin/keys/
+__pycache__/
+*.pyc
