@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Phantom Simulator</title>
+  <meta name="description" content="A browser version of the Phantom Wallet Simulator — an educational crypto-wallet demo." />
+  <link rel="icon" href="/assets/phantom_logo.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="phone" id="phone">
+
+    <!-- ===================== SPLASH ===================== -->
+    <section class="view view--center" id="view-splash">
+      <div class="splash">
+        <img class="logo logo--lg" src="/assets/phantom_logo.png" alt="Phantom logo" />
+        <h1 class="brand">PHANTOM</h1>
+        <div class="progress"><div class="progress__bar" id="splash-bar"></div></div>
+      </div>
+    </section>
+
+    <!-- ===================== LANDING ===================== -->
+    <section class="view view--center hidden" id="view-landing">
+      <div class="hero">
+        <img class="logo logo--lg" src="/assets/phantom_logo.png" alt="Phantom logo" />
+        <h2 class="title">Phantom Simulator</h2>
+        <p class="muted center">The next generation of crypto<br/>wallet simulation.</p>
+      </div>
+      <div class="stack stack--wide">
+        <button class="btn btn--primary btn--tall" id="btn-create">✨ Create New Wallet</button>
+        <button class="btn btn--ghost btn--tall" id="btn-have">📥 I already have a wallet</button>
+      </div>
+    </section>
+
+    <!-- ===================== TERMS ===================== -->
+    <section class="view hidden" id="view-terms">
+      <div class="topbar">
+        <button class="btn btn--ghost btn--sm" id="terms-back">← Back</button>
+        <span class="topbar__title">Legal &amp; Privacy</span>
+      </div>
+      <div class="scroll" id="terms-scroll">
+        <div class="warn">
+          <div class="warn__title">⚠️ Security Warning</div>
+          <div class="warn__body">We cannot recover your funds if you lose your seed phrase.</div>
+        </div>
+        <h3 class="section-title">Terms of Service</h3>
+        <div id="terms-body"><p class="muted">Loading…</p></div>
+      </div>
+      <div class="footer">
+        <div class="check-row">
+          <label class="check">
+            <input type="checkbox" id="terms-check" disabled />
+            <span>✓ I understand and agree</span>
+          </label>
+          <button class="round-btn" id="terms-goend" title="Go to end">↓</button>
+        </div>
+        <button class="btn btn--primary btn--tall" id="terms-continue" disabled>Continue →</button>
+      </div>
+    </section>
+
+    <!-- ===================== SEED ===================== -->
+    <section class="view hidden" id="view-seed">
+      <h2 class="title center mt">Secret Recovery Phrase</h2>
+      <p class="muted center">Save these words in a safe place.</p>
+      <div class="seed-grid" id="seed-grid"></div>
+      <div class="row center gap">
+        <button class="btn btn--ghost btn--sm" id="seed-reveal">👁 Reveal</button>
+        <button class="btn btn--primary btn--sm" id="seed-copy">📋 Copy</button>
+      </div>
+      <div class="grow"></div>
+      <button class="btn btn--primary btn--tall mb" id="seed-finish">✓ I have saved my phrase</button>
+    </section>
+
+    <!-- ===================== LOGIN / IMPORT ===================== -->
+    <section class="view hidden" id="view-login">
+      <div class="topbar">
+        <button class="btn btn--ghost btn--sm" id="login-back">←</button>
+        <span class="topbar__title">Import Wallet</span>
+      </div>
+      <p class="label">Enter your 12-word seed phrase (paste or type):</p>
+      <div class="seed-inputs" id="login-inputs"></div>
+      <p class="error center" id="login-error"></p>
+      <div class="grow"></div>
+      <button class="btn btn--primary btn--tall mb" id="login-import">Import Wallet</button>
+    </section>
+
+    <!-- ===================== DASHBOARD ===================== -->
+    <section class="view hidden" id="view-dashboard">
+      <div class="scroll">
+        <div class="card addr-card">
+          <div class="muted sm">Wallet Address</div>
+          <div class="row">
+            <span class="mono addr" id="dash-address">0x…</span>
+            <button class="icon-btn" id="dash-copy" title="Copy address">📋</button>
+          </div>
+        </div>
+
+        <div class="dash-header">
+          <div class="avatar" id="dash-avatar">W</div>
+          <button class="btn btn--secondary btn--xs" id="dash-edit">Edit</button>
+          <span class="wallet-name" id="dash-name">My Wallet</span>
+          <button class="btn btn--link" id="dash-logout">Log Out</button>
+        </div>
+
+        <div class="balance">
+          <div class="balance__amt" id="dash-balance">$0.00</div>
+          <div class="balance__pnl">Pnl +$24.50 (1.2%)</div>
+        </div>
+
+        <div class="actions">
+          <div class="action" id="act-send">
+            <div class="action__circle"><img src="/assets/send_arrow_icon.png" alt="" onerror="this.replaceWith(document.createTextNode('↗'))"/></div>
+            <span>Send</span>
+          </div>
+          <div class="action" id="act-receive">
+            <div class="action__circle"><img src="/assets/receive_arrow_icon.png" alt="" onerror="this.replaceWith(document.createTextNode('↙'))"/></div>
+            <span>Receive</span>
+          </div>
+          <div class="action" id="act-history">
+            <div class="action__circle"><img src="/assets/history_clock_icon.png" alt="" onerror="this.replaceWith(document.createTextNode('🕐'))"/></div>
+            <span>History</span>
+          </div>
+        </div>
+
+        <h3 class="section-title">Holdings</h3>
+        <div id="dash-holdings"></div>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- ===================== MODALS ===================== -->
+  <div class="modal-overlay hidden" id="modal-overlay">
+
+    <!-- SEND -->
+    <div class="modal hidden" id="modal-send">
+      <div class="modal__head"><span>Send Assets</span><button class="icon-btn modal-close">✕</button></div>
+      <input class="input" id="send-addr" placeholder="Recipient Address" />
+      <input class="input" id="send-amt" placeholder="Amount" inputmode="decimal" />
+      <select class="input" id="send-token"></select>
+      <div class="fee-box hidden" id="send-fee"></div>
+      <div class="status" id="send-status"></div>
+      <button class="btn btn--primary btn--tall" id="send-review">Review Transaction</button>
+      <div class="row gap hidden" id="send-step2">
+        <button class="btn btn--secondary btn--tall grow" id="send-cancel">Cancel</button>
+        <button class="btn btn--primary btn--tall grow" id="send-now">Send Now</button>
+      </div>
+    </div>
+
+    <!-- RECEIVE -->
+    <div class="modal hidden" id="modal-receive">
+      <div class="modal__head"><span>Receive Assets</span><button class="icon-btn modal-close">✕</button></div>
+      <div class="qr-box"><img id="receive-qr" alt="QR code" /></div>
+      <div class="row">
+        <span class="mono addr sm" id="receive-address"></span>
+        <button class="icon-btn" id="receive-copy" title="Copy address">📋</button>
+      </div>
+      <p class="label">Receive Token</p>
+      <select class="input" id="receive-token"></select>
+      <p class="label">Amount</p>
+      <input class="input" id="receive-amt" placeholder="Enter amount (e.g., 1.5)" inputmode="decimal" />
+      <div class="status" id="receive-status"></div>
+      <button class="btn btn--primary btn--tall" id="receive-now">Simulate Receive</button>
+    </div>
+
+    <!-- HISTORY -->
+    <div class="modal modal--tall hidden" id="modal-history">
+      <div class="modal__head"><span>Activity</span><button class="icon-btn modal-close">✕</button></div>
+      <div class="row gap">
+        <button class="btn btn--primary btn--sm grow" id="hist-sort-amt">📊 Sort by Amount</button>
+        <button class="btn btn--secondary btn--sm grow" id="hist-sort-time">🆕 By Time</button>
+      </div>
+      <div class="scroll scroll--modal" id="hist-list"></div>
+    </div>
+
+    <!-- EDIT PROFILE -->
+    <div class="modal hidden" id="modal-profile">
+      <div class="modal__head"><span>Edit Profile</span><button class="icon-btn modal-close">✕</button></div>
+      <p class="label">Wallet Name</p>
+      <input class="input" id="profile-name" />
+      <p class="label">Profile Picture</p>
+      <div class="pfp-preview" id="profile-preview">No Image<br/>Selected</div>
+      <input type="file" id="profile-file" accept="image/png,image/jpeg,image/jpg" hidden />
+      <button class="btn btn--secondary btn--tall" id="profile-upload">Upload Image</button>
+      <button class="btn btn--primary btn--tall" id="profile-save">Save Changes</button>
+    </div>
+
+  </div>
+
+  <div class="toast hidden" id="toast"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+# Web version of the Phantom Wallet Simulator (app.py + wallet_core.py).
+# Install with:  pip install -r requirements-web.txt
+Flask>=3.0
+cryptography>=42.0
+openpyxl>=3.1
+qrcode[pil]>=7.4
+Pillow>=10.0
