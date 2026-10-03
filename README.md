@@ -17,7 +17,8 @@ It provides a complete crypto wallet experience with deterministic seed phrases,
 - Sortable transaction history  
 
 ### 🛡️ Security & Cryptography
-- **AES-256 (Fernet)** encryption for seed phrases  
+- **Fernet (AES-128-CBC + HMAC-SHA256)** encryption for seed phrases — only encrypted seeds are stored  
+- Keys persist in `admin/keys/` (git-ignored), so encrypted data and signatures stay valid across restarts  
 - **RSA-2048** digital signatures on every transaction  
 - Secure transaction IDs via `secrets`  
 - Atomic excel writes via `openpyxl`  
@@ -43,10 +44,12 @@ It provides a complete crypto wallet experience with deterministic seed phrases,
 Phantom-Wallet/
 │
 ├── wallet.py                # Main application (single-file logic)
+├── requirements.txt
 ├── admin/
 │   ├── audit_log.txt        # High-level audit trail
 │   ├── security_log.txt     # Cryptographic trace logs
-│   └── wallets.xlsx         # Excel wallet storage (atomic writes)
+│   ├── wallets.xlsx         # Excel wallet storage (atomic writes, encrypted seeds)
+│   └── keys/                # Generated on first run, git-ignored
 │
 ├── assets/                  # Icons & visuals
 │   ├── phantom_logo.png
@@ -71,9 +74,14 @@ Phantom-Wallet/
 
 ### ▶️ Steps
 
-Download the zip file
-Install all Libraries
-Run wallet.py
+```bash
+git clone https://github.com/ethanleezhan-droid/phantom.git
+cd phantom
+pip install -r requirements.txt
+python wallet.py
+```
+
+On Linux you may also need Tk: `sudo apt install python3-tk`. On Windows and macOS (python.org installer) Tk is included.
 
 ## 💡 Credits
 

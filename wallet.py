@@ -15,6 +15,11 @@ from tkinter import filedialog
 from typing import Optional
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+
+# Run from the script's folder so assets/, data/ and admin/ resolve no matter where it's launched from
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 # ==========================================
 # Loading the Terms and Conditions
@@ -174,21 +179,47 @@ class ImageHelper:
 
 # InfoSec Concept: AES Encryption, RSA Signatures, HMAC Authentication, SHA256 Hashing
 class SecurityManager:
+    # Keys are kept on disk (git-ignored) so data encrypted or signed in one session
+    # can still be decrypted / verified the next time the app starts.
+    KEY_DIR = os.path.join("admin", "keys")
+
     def __init__(self):
-        # Fernet (symmetric encryption)
-        self.fernet_key = Fernet.generate_key()
+        os.makedirs(self.KEY_DIR, exist_ok=True)
+
+        # Fernet (AES-128-CBC + HMAC-SHA256 symmetric encryption)
+        self.fernet_key = self._load_or_create_key("fernet.key", Fernet.generate_key)
         self.cipher = Fernet(self.fernet_key)
-        
+
         # RSA keys for digital signatures
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        self.private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048
-        )
+        pem = self._load_or_create_key("rsa_private.pem", self._new_rsa_pem)
+        self.private_key = serialization.load_pem_private_key(pem, password=None)
         self.public_key = self.private_key.public_key()
-        
+
         # HMAC secret key
-        self.hmac_key = secrets.token_bytes(32)
+        self.hmac_key = self._load_or_create_key("hmac.key", lambda: secrets.token_bytes(32))
+
+    def _load_or_create_key(self, filename, generate):
+        path = os.path.join(self.KEY_DIR, filename)
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                return f.read()
+        key = generate()
+        with open(path, "wb") as f:
+            f.write(key)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return key
+
+    @staticmethod
+    def _new_rsa_pem():
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        return key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
 
     def sanitize_input(self, user_input):
         if not isinstance(user_input, str):
@@ -198,8 +229,8 @@ class SecurityManager:
     def validate_amount(self, amount):
         try:
             val = float(amount)
-            return val > 0
-        except ValueError:
+            return val > 0 and val != float("inf")
+        except (TypeError, ValueError):
             return False
 
     def generate_hash(self, data):
@@ -230,9 +261,7 @@ class SecurityManager:
             return None
     
     def sign_transaction(self, tx_data):
-        """RSA Digital Signature for transaction"""
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import padding
+        """RSA Digital Signature for transaction (full hex signature)"""
         try:
             tx_str = str(tx_data).encode()
             signature = self.private_key.sign(
@@ -243,9 +272,25 @@ class SecurityManager:
                 ),
                 hashes.SHA256()
             )
-            return signature.hex()[:64]  # Return first 64 chars
+            return signature.hex()
         except Exception as e:
             return None
+
+    def verify_signature(self, tx_data, signature_hex):
+        """Verify an RSA signature produced by sign_transaction"""
+        try:
+            self.public_key.verify(
+                bytes.fromhex(signature_hex),
+                str(tx_data).encode(),
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA256()
+            )
+            return True
+        except Exception:
+            return False
 
     def generate_secure_id(self, length=16):
         """Secure random ID generation"""
@@ -261,7 +306,7 @@ COIN_METADATA = {
     "SOL": {"name": "Solana", "icon": "solana_sol_icon_transparent.png", "network": "Solana", "fee": 0.01, "fee_coin": "SOL"},
     "USDT": {"name": "USDT", "icon": "usdt_tether_icon_transparent.png", "network": "BSC Mainnet", "fee": 0.001, "fee_coin": "BNB", "fee_icon": "binance_bnb_icon_transparent.png"},
     "USDC": {"name": "USDC", "icon": "usdc_usd_coin_icon_transparent.png", "network": "BSC Mainnet", "fee": 0.001, "fee_coin": "BNB", "fee_icon": "binance_bnb_icon_transparent.png"},
-    "POL": {"name": "Polygon", "icon": "polygon_matic_icon_transparent.png", "network": "Polygon Network", "fee": 0.2, "fee_coin": "MATIC"},
+    "MATIC": {"name": "Polygon", "icon": "polygon_matic_icon_transparent.png", "network": "Polygon Network", "fee": 0.2, "fee_coin": "MATIC"},
     "BNB": {"name": "BNB", "icon": "binance_bnb_icon_transparent.png", "network": "BSC Mainnet", "fee": 0.001, "fee_coin": "BNB"},
 }
 
@@ -269,7 +314,46 @@ COIN_METADATA = {
 # CORE WALLET LOGIC
 # ==========================================
 
+# Unique words only, so a seed phrase never repeats a word
+SEED_WORDS = [
+    "able", "about", "above", "acid", "actor", "adapt", "admit", "adult", "advice", "agent",
+    "agree", "ahead", "alarm", "album", "alert", "alien", "alpha", "amber", "anchor", "angle",
+    "animal", "ankle", "answer", "apple", "april", "arena", "armor", "arrow", "artist", "atom",
+    "august", "aunt", "autumn", "avocado", "awake", "badge", "bamboo", "banana", "banner",
+    "barrel", "basket", "beach", "beauty", "bench", "berry", "bicycle", "bird", "blanket",
+    "blossom", "board", "boat", "bonus", "border", "bottle", "brave", "bread", "breeze",
+    "brick", "bridge", "bright", "bronze", "brush", "bubble", "bucket", "buffalo", "butter",
+    "cabin", "cable", "cactus", "camera", "camp", "candle", "canyon", "captain", "carbon",
+    "cargo", "carpet", "castle", "cattle", "cedar", "cereal", "chalk", "cherry", "chess",
+    "chief", "chimney", "circle", "citrus", "civil", "clay", "cliff", "clock", "cloud",
+    "clover", "coast", "cobalt", "coconut", "coffee", "comet", "copper", "coral", "cotton",
+    "cousin", "crane", "crater", "cricket", "crystal", "cupboard", "dance", "dawn", "delta",
+    "desert", "diamond", "dinner", "dolphin", "dragon", "drama", "dream", "eagle", "earth",
+    "echo", "eclipse", "elbow", "ember", "empire", "engine", "falcon", "fancy", "feather",
+    "fence", "fiber", "field", "flame", "flavor", "forest", "fossil", "fountain", "fox",
+    "frost", "galaxy", "garden", "garlic", "gentle", "giant", "ginger", "glacier", "globe",
+    "golden", "gorilla", "grape", "gravity", "guitar", "hammer", "harbor", "harvest", "hazel",
+    "helmet", "hero", "honey", "horizon", "hotel", "humble", "iceberg", "idea", "island",
+    "ivory", "jacket", "jaguar", "jazz", "jelly", "jewel", "jungle", "kayak", "kernel",
+    "kettle", "kingdom", "kitten", "ladder", "lagoon", "lantern", "laser", "lemon", "leopard",
+    "library", "lily", "lobster", "lunar", "magnet", "mango", "maple", "marble", "meadow",
+    "melody", "mercury", "meteor", "mirror", "monkey", "mosaic", "motion", "mountain", "museum",
+    "nectar", "needle", "noble", "novel", "nutmeg", "oasis", "ocean", "olive", "orange",
+    "orbit", "orchid", "otter", "oxygen", "paddle", "palace", "panda", "paper", "parrot",
+    "pencil", "pepper", "piano", "pilot", "planet", "pocket", "polar", "pony", "prism",
+    "pumpkin", "puzzle", "quartz", "rabbit", "radar", "rainbow", "raven", "river", "rocket",
+    "ruby", "saddle", "salmon", "satellite", "scarf", "silver", "sketch", "solar", "spice",
+    "spider", "spirit", "sponge", "squirrel", "stadium", "stone", "storm", "sugar", "summit",
+    "sunset", "swift", "tango", "thunder", "tiger", "timber", "tomato", "topaz", "tornado",
+    "tower", "tulip", "tunnel", "turtle", "umbrella", "unicorn", "valley", "velvet", "violin",
+    "volcano", "voyage", "walnut", "whale", "willow", "window", "winter", "wizard", "wolf",
+    "yellow", "zebra",
+]
+
 class WalletBackend:
+    WALLETS_FILE = os.path.join("admin", "wallets.xlsx")
+    HEADERS = ["ID", "Wallet Name", "Created", "Last Access", "Address", "Balance", "Status", "Encrypted Seed", "PFP Path"]
+
     def __init__(self):
         self.history = []
         self.holdings = {}
@@ -281,6 +365,8 @@ class WalletBackend:
 
         self.wallet_data: Optional[dict] = None
         self.observers = []
+        # schedule(ms, fn) runs fn later on the UI thread; set by the App (Tk's `after`)
+        self._schedule = None
 
         self.prices = {
             "BTC": 94230.50,
@@ -295,54 +381,70 @@ class WalletBackend:
     def subscribe(self, callback):
         self.observers.append(callback)
 
+    def unsubscribe(self, callback):
+        if callback in self.observers:
+            self.observers.remove(callback)
+
     def notify(self):
-        for callback in self.observers:
+        for callback in list(self.observers):
             callback()
 
-    def create_wallet(self, seed_phrase=None):
-        try:
-            seed_words = ["apple", "river", "wind", "stone", "fire", "star", "moon", "sun", "tree", "ocean", "mountain", "cloud", "earth", "sky", "rain", "snow", "cloud", "beach", "ocean", "forest", "thunder", "silver", "golden", "bright", "swift", "calm"]
+    def set_scheduler(self, schedule):
+        self._schedule = schedule
 
-            # If importing existing wallet, use provided seed
-            if seed_phrase:
-                seed = seed_phrase.split()
+    def _run_later(self, ms, fn):
+        # Tkinter is not thread-safe, so delayed work goes through the UI event loop when available
+        if self._schedule:
+            self._schedule(ms, fn)
+        else:
+            threading.Timer(ms / 1000, fn).start()
+
+    def _load_wallet(self, seed):
+        """Derive address and holdings from the seed and reset per-wallet state"""
+        # DETERMINISTIC ADDRESS: Hash of seed phrase always produces same address
+        seed_hash = hashlib.sha256(" ".join(seed).encode()).hexdigest()
+        address = "0x" + seed_hash[:40]  # Use first 40 chars of hash
+
+        self.wallet_data = {
+            "name": "My Wallet 1",
+            "address": address,
+            "seed": seed,
+            "balance": 0.0,
+            "pfp": None
+        }
+
+        self.history = []
+        self.undo_stack = UndoStack()
+        self.transaction_queue = TransactionQueue()
+        self.priority_mempool = PriorityMempool()
+
+        # DETERMINISTIC HOLDINGS: Use seed hash to generate reproducible amounts
+        self.holdings = {}
+        seed_int = int(seed_hash, 16)  # Convert hex to int for seeding
+
+        for i, (token, price) in enumerate(self.prices.items()):
+            # Use deterministic values based on seed - ENSURE NON-ZERO AMOUNTS
+            if token in ["BTC", "ETH", "BNB"]:
+                # Generate amount between 0.5 and 5.0
+                amount = 0.5 + (((seed_int + i * 2000) % 450) / 100.0)
             else:
-                # Create new wallet with random seed
-                seed = secrets.SystemRandom().sample(seed_words, 12)
+                # Generate amount between 10 and 100
+                amount = float(10 + ((seed_int + i * 3000) % 90))
 
-            # DETERMINISTIC ADDRESS: Hash of seed phrase always produces same address
-            seed_hash = hashlib.sha256(" ".join(seed).encode()).hexdigest()
-            address = "0x" + seed_hash[:40]  # Use first 40 chars of hash
+            self.holdings[token] = {"amount": amount, "price": price}
 
-            self.wallet_data = {
-                "name": "My Wallet 1",
-                "address": address,
-                "seed": seed,
-                "balance": 0.0,
-                "pfp": None
-            }
+        self.recalculate_balance()
+        return address
 
-            # DETERMINISTIC HOLDINGS: Use seed hash to generate reproducible amounts
-            self.holdings = {}
-            seed_int = int(seed_hash, 16)  # Convert hex to int for seeding
-
-            for i, (token, price) in enumerate(self.prices.items()):
-                # Use deterministic values based on seed - ENSURE NON-ZERO AMOUNTS
-                if token in ["BTC", "ETH", "BNB"]:
-                    # Generate amount between 0.5 and 5.0
-                    amount = 0.5 + (((seed_int + i * 2000) % 450) / 100.0)
-                else:
-                    # Generate amount between 10 and 100
-                    amount = float(10 + ((seed_int + i * 3000) % 90))
-
-                self.holdings[token] = {"amount": amount, "price": price}
-
-            self.recalculate_balance()
+    def create_wallet(self):
+        """Create a brand new wallet with a random 12-word seed (no repeated words)"""
+        try:
+            seed = secrets.SystemRandom().sample(SEED_WORDS, 12)
+            address = self._load_wallet(seed)
             self.log_wallet_creation(seed, address)
             self.audit_log.add_log(f"Wallet created: {address}")
             self.save_wallet_to_file(status="CREATED")
             self.notify()
-
         except Exception as e:
             print(f"Error creating wallet: {e}")
 
@@ -353,8 +455,6 @@ class WalletBackend:
         clean_name = self.security.sanitize_input(new_name)
         if clean_name:
             self.wallet_data["name"] = clean_name
-            # Update wallet name in wallets.txt
-            self.update_wallet_in_file()
 
         if new_pfp_path:
             try:
@@ -363,99 +463,60 @@ class WalletBackend:
                 dest_path = os.path.join(ASSETS_PATH, unique_name)
                 shutil.copy(new_pfp_path, dest_path)
                 self.wallet_data["pfp"] = dest_path
-                # Save wallet with PFP to wallets.txt with CREATED status
-                self.save_wallet_to_file_with_pfp(status="CREATED")
             except Exception as e:
                 print(f"Failed to upload PFP: {e}")
 
+        self.save_wallet_to_file()
         self.audit_log.add_log("Wallet metadata updated")
         self.notify()
 
-    def update_wallet_in_file(self):
-        """Update wallet name in wallets.txt when renamed"""
-        try:
-            os.makedirs("admin", exist_ok=True)
-            filename = os.path.join("admin", "wallets.txt")
-
-            if not os.path.exists(filename):
-                return
-
-            # Read all lines
-            with open(filename, "r") as f:
-                lines = f.readlines()
-
-            # Update wallet name in matching address row
-            with open(filename, "w") as f:
-                for line in lines:
-                    if self.wallet_data and self.wallet_data["address"] in line and "|" in line:
-                        # Reconstruct the line with updated name
-                        parts = line.split("|")
-                        if len(parts) >= 6:
-                            wallet_id = parts[0].strip()
-                            timestamp = parts[2].strip()
-                            address = parts[3].strip()
-                            balance = f"${self.wallet_data['balance']:>13,.2f}"
-                            seed_phrase = parts[5].strip()
-                            line = f"{wallet_id:<5} | {self.wallet_data['name']:<15} | {timestamp:<20} | {address:<45} | {balance} | {seed_phrase}\n"
-                    f.write(line)
-        except Exception as e:
-            pass
-
     def login(self, seed_phrase):
-        clean_seed = self.security.sanitize_input(seed_phrase).strip()
+        clean_seed = self.security.sanitize_input(seed_phrase).lower()
 
         # Validate seed phrase format (must be 12 words)
         words = clean_seed.split()
-        if len(words) != 12 or not all(isinstance(w, str) and len(w) > 0 for w in words):
+        if len(words) != 12:
             return False
 
-        # Pass seed phrase to create_wallet for DETERMINISTIC generation
-        self.create_wallet(seed_phrase=clean_seed)
+        # Same seed always gives the same wallet (DETERMINISTIC generation)
+        address = self._load_wallet(words)
 
-        # Restore wallet name and PFP from wallets.txt if it exists (existing wallet)
-        wallet_restored = False
-        if self.wallet_data is not None:
-            wallet_restored = self.restore_wallet_metadata()
-
-        # Always save wallet info (with name, PFP, and status)
-        if wallet_restored:
-            # IMPORTED wallet - update with IMPORTED status
-            self.save_wallet_to_file_with_pfp(status="IMPORTED")
+        # Restore wallet name and PFP if this wallet was saved before
+        if self.restore_wallet_metadata():
+            self.save_wallet_to_file(status="IMPORTED")
         else:
-            # NEW wallet - save with CREATED status
+            self.log_wallet_creation(words, address)
             self.save_wallet_to_file(status="CREATED")
 
-        self.audit_log.add_log("User logged in with seed phrase")
+        self.audit_log.add_log(f"User logged in with seed phrase: {address}")
         self.notify()
         return True
 
     def restore_wallet_metadata(self):
         """Restore wallet name and PFP from wallets.xlsx. Returns True if wallet found."""
-        if not self.wallet_data:
-            return False
-        filename = os.path.join("admin", "wallets.xlsx")
-        if not os.path.exists(filename):
+        if not self.wallet_data or not os.path.exists(self.WALLETS_FILE):
             return False
 
         wb = None
         try:
-            wb = load_workbook(filename)
+            wb = load_workbook(self.WALLETS_FILE)
             ws = wb.active
 
             # Find matching wallet by address (Address is column E = index 4)
-            for row in ws.iter_rows(min_row=2, values_only=False):
-                if row[4].value == self.wallet_data.get("address"):
-                    # Found matching wallet - RESTORE IT
-                    if row[1].value:  # Wallet Name
-                        self.wallet_data["name"] = row[1].value
-                    # Check for PFP file in assets
-                    if row[8].value:  # PFP Path
-                        pfp_file = row[8].value
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if row[4] == self.wallet_data.get("address"):
+                    if row[1]:  # Wallet Name
+                        self.wallet_data["name"] = row[1]
+                    pfp_file = row[8] if len(row) > 8 else None
+                    if pfp_file and pfp_file != "None":
+                        # Paths saved on Windows use backslashes
+                        pfp_file = str(pfp_file).replace("\\", "/")
                         if os.path.exists(pfp_file):
                             self.wallet_data["pfp"] = pfp_file
-                    return True  # Wallet was restored
-            return False  # Wallet not found in file (new wallet)
+                    return True
+            return False
         except Exception as e:
+            print(f"Error reading wallets file: {e}")
             return False
         finally:
             if wb:
@@ -463,9 +524,11 @@ class WalletBackend:
 
     def logout(self):
         self.wallet_data = None
+        self.history = []
+        self.holdings = {}
         self.audit_log.add_log("User logged out")
         self.notify()
-    
+
     def log_security_transaction(self, tx):
         """Log transaction with meaningful security data only"""
         os.makedirs("admin", exist_ok=True)
@@ -476,55 +539,81 @@ class WalletBackend:
             tx_hash = tx.get("hash", "unknown")
             token = tx.get("token", "unknown")
             amount = tx.get("amount", 0)
-            
+
             # Generate cryptographic signatures
             tx_data_str = f"{tx_id}{tx_type}{token}{amount}"
             hmac_sig = self.security.generate_hmac(tx_data_str)
             rsa_sig = self.security.sign_transaction(tx_data_str)
-            
+            tx["signature"] = rsa_sig
+
             f.write(f"\n[{timestamp}] {tx_type} | {token} {amount}")
-            
+
             if tx_type == "SEND":
                 recipient = tx.get('recipient', 'N/A')
                 fee = tx.get('fee', 0)
-                f.write(f" -> {recipient} (Fee: {fee})")
-            
+                fee_coin = tx.get('fee_coin', token)
+                f.write(f" -> {recipient} (Fee: {fee} {fee_coin})")
+
             f.write(f"\nTransaction ID: {tx_id}\n")
             f.write(f"SHA256 Hash: {tx_hash}\n")
             f.write(f"HMAC-SHA256: {hmac_sig}\n")
             f.write(f"RSA-2048 Sig: {rsa_sig}\n")
             f.write(f"{'-'*80}\n")
-    
+
     def log_wallet_creation(self, seed_phrase, address):
         """Log wallet creation with security details"""
         os.makedirs("admin", exist_ok=True)
         with open(os.path.join("admin", "security_log.txt"), "a") as f:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
+
             # Encrypt seed phrase for logging
             encrypted_seed = self.security.encrypt_seed_phrase(seed_phrase)
             seed_hash = self.security.generate_hash(" ".join(seed_phrase))
-            
+
             f.write(f"\n[{timestamp}] WALLET CREATED\n")
             f.write(f"Address: {address}\n")
-            f.write(f"Encrypted Seed (AES-256): {str(encrypted_seed)[:50]}...[PROTECTED]\n")
+            f.write(f"Encrypted Seed (Fernet/AES): {str(encrypted_seed)[:50]}...[PROTECTED]\n")
             f.write(f"Seed Hash (SHA256): {seed_hash}\n")
             f.write(f"{'-'*80}\n")
 
+    def check_funds(self, token, amount):
+        """Return an error message if `amount` of `token` (plus its network fee) can't be sent, else None"""
+        meta = COIN_METADATA.get(token)
+        if meta is None or token not in self.holdings:
+            return f"❌ You don't hold any {token}"
+
+        fee = meta.get("fee", 0)
+        fee_coin = meta.get("fee_coin", token)
+        have = self.holdings[token]["amount"]
+
+        if fee_coin == token:
+            if have < amount + fee:
+                return f"❌ Insufficient funds! You have {have:.6g} {token}, but need {amount + fee:.6g} {token} (including {fee} fee)"
+        else:
+            if have < amount:
+                return f"❌ Insufficient funds! You have {have:.6g} {token}, but need {amount:.6g} {token}"
+            fee_have = self.holdings.get(fee_coin, {}).get("amount", 0)
+            if fee_have < fee:
+                return f"❌ Not enough {fee_coin} for the network fee. You have {fee_have:.6g} {fee_coin}, need {fee} {fee_coin}"
+        return None
+
     def send_transaction_execute(self, recipient, amount, token):
         if not self.security.validate_amount(amount):
-            return "Invalid amount"
+            return "❌ Invalid amount"
         amount = float(amount)
         recipient = self.security.sanitize_input(recipient)
+        if not recipient:
+            return "❌ Please enter recipient address"
 
-        # Get network fee
-        fee = COIN_METADATA.get(token, {}).get("fee", 0)
-        total_amount = amount + fee
+        error = self.check_funds(token, amount)
+        if error:
+            return error
 
-        if token not in self.holdings or self.holdings[token]["amount"] < total_amount:
-            return f"❌ Insufficient funds! You have {self.holdings[token]['amount']:.6g} {token}, but need {total_amount:.6g} {token} (including {fee} fee)"
-
-        self.holdings[token]["amount"] -= total_amount
+        # Network fee is paid in the network's coin (e.g. BNB for USDT on BSC)
+        fee = COIN_METADATA[token]["fee"]
+        fee_coin = COIN_METADATA[token]["fee_coin"]
+        self.holdings[token]["amount"] -= amount
+        self.holdings[fee_coin]["amount"] -= fee
         self.recalculate_balance()
 
         tx = {
@@ -533,6 +622,7 @@ class WalletBackend:
             "token": token,
             "amount": amount,
             "fee": fee,
+            "fee_coin": fee_coin,
             "recipient": recipient,
             "time": datetime.datetime.now(),
             "status": "pending",
@@ -540,25 +630,29 @@ class WalletBackend:
         }
 
         self.history.insert(0, tx)
-        
+
         # Hook up DSA structures
         self.undo_stack.push(tx)
         self.transaction_queue.enqueue(tx)
         self.priority_mempool.add_transaction(amount, tx)
-        
+
         # Log security details
         self.log_security_transaction(tx)
-        self.audit_log.add_log(f"Sent {amount} {token} to {recipient} with {fee} fee")
+        self.audit_log.add_log(f"Sent {amount} {token} to {recipient} with {fee} {fee_coin} fee")
         self.notify()
 
-        threading.Thread(target=self._confirm_tx, args=(tx,), daemon=True).start()
+        self._run_later(2000, lambda: self._confirm_tx(tx))
 
         return "✅ Transaction sent successfully!"
 
     def receive_transaction(self, amount, token):
-        # BUG FIX: Ensure token exists before receiving
+        if not self.security.validate_amount(amount):
+            return False
+        amount = float(amount)
         if token not in self.holdings:
-            self.holdings[token] = {"amount": 0.0, "price": self.prices.get(token, 1.0)}
+            if token not in self.prices:
+                return False
+            self.holdings[token] = {"amount": 0.0, "price": self.prices[token]}
 
         tx = {
             "id": self.security.generate_secure_id(8),
@@ -571,28 +665,27 @@ class WalletBackend:
         }
 
         self.history.insert(0, tx)
-        
+
         # Hook up DSA structures
         self.undo_stack.push(tx)
         self.transaction_queue.enqueue(tx)
         self.priority_mempool.add_transaction(amount, tx)
-        
+
         # Log security details
         self.log_security_transaction(tx)
         self.audit_log.add_log(f"Received {amount} {token}")
         self.notify()
-        threading.Thread(target=self._confirm_receive, args=(tx, amount, token), daemon=True).start()
+        self._run_later(2000, lambda: self._confirm_receive(tx, amount, token))
+        return True
 
     def _confirm_tx(self, tx):
-        time.sleep(2)
         tx["status"] = "confirmed"
         self.notify()
 
     def _confirm_receive(self, tx, amount, token):
-        time.sleep(2)
         tx["status"] = "confirmed"
-        # BUG FIX: Verify token exists before updating
-        if token in self.holdings:
+        # The wallet may have been logged out / switched while pending
+        if tx in self.history and token in self.holdings:
             self.holdings[token]["amount"] += amount
             self.recalculate_balance()
         self.notify()
@@ -604,152 +697,76 @@ class WalletBackend:
         if self.wallet_data:
             self.wallet_data["balance"] = total
 
-    def save_wallet_to_file_with_pfp(self, status="CREATED"):
-        """Save wallet with PFP path and status to Excel file using atomic write"""
-        os.makedirs("admin", exist_ok=True)
-        filename = os.path.join("admin", "wallets.xlsx")
-        wb = None
-        temp_fd = None
-        try:
-            # Load or create workbook
-            if os.path.exists(filename):
-                wb = load_workbook(filename)
-                ws = wb.active
-            else:
-                wb = Workbook()
-                ws = wb.active
-                ws.title = "Wallets"
-                # Add headers
-                headers = ["ID", "Wallet Name", "Created", "Last Access", "Address", "Balance", "Status", "Seed Phrase", "PFP Path"]
-                ws.append(headers)
-                # Style header row
-                header_fill = PatternFill(start_color="9945FF", end_color="9945FF", fill_type="solid")
-                header_font = Font(bold=True, color="FFFFFF")
-                for cell in ws[1]:
-                    cell.fill = header_fill
-                    cell.font = header_font
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
+    def _open_workbook(self):
+        """Load wallets.xlsx (creating it if needed) and encrypt any plaintext seeds left by older versions"""
+        if os.path.exists(self.WALLETS_FILE):
+            wb = load_workbook(self.WALLETS_FILE)
+            ws = wb.active
+            if ws.cell(row=1, column=8).value == "Seed Phrase":
+                ws.cell(row=1, column=8).value = "Encrypted Seed"
+                for row in ws.iter_rows(min_row=2):
+                    if row[7].value:
+                        row[7].value = self.security.encrypt_seed_phrase(str(row[7].value))
+            return wb, ws
 
-            # Check if wallet already exists
-            wallet_exists = False
-            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Wallets"
+        ws.append(self.HEADERS)
+        # Style header row
+        header_fill = PatternFill(start_color="9945FF", end_color="9945FF", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+        for cell in ws[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        for col, width in zip("ABCDEFGHI", [5, 18, 20, 20, 50, 15, 12, 50, 50]):
+            ws.column_dimensions[col].width = width
+        return wb, ws
 
-            if self.wallet_data:
-                for row_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
-                    if row[4].value == self.wallet_data["address"]:
-                        # Update existing wallet entry
-                        row[1].value = self.wallet_data['name']
-                        row[3].value = now
-                        row[5].value = self.wallet_data.get('balance', 0)
-                        row[6].value = status
-                        row[8].value = self.wallet_data.get("pfp", "")
-                        wallet_exists = True
-                        break
-
-            # If wallet doesn't exist, add new entry
-            if not wallet_exists and self.wallet_data:
-                wallet_id = len([row for row in ws.iter_rows(min_row=2)]) + 1
-                created_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                seed_phrase = " ".join(self.wallet_data.get("seed", []))
-                ws.append([
-                    wallet_id,
-                    self.wallet_data['name'],
-                    created_date,
-                    created_date,
-                    self.wallet_data['address'],
-                    self.wallet_data.get('balance', 0),
-                    status,
-                    seed_phrase,
-                    self.wallet_data.get("pfp", "")
-                ])
-
-            # Use atomic write: save to temp file first, then rename
-            temp_fd, temp_path = tempfile.mkstemp(suffix=".xlsx", dir="admin")
-            os.close(temp_fd)
-            wb.save(temp_path)
-            if os.path.exists(filename):
-                os.remove(filename)
-            os.rename(temp_path, filename)
-        except Exception as e:
-            print(f"Error saving wallet to Excel: {e}")
-        finally:
-            if wb:
-                wb.close()
-
-    def save_wallet_to_file(self, status="CREATED"):
-        """Save wallet info to admin/wallets.xlsx in Excel format with status tracking using atomic write"""
+    def save_wallet_to_file(self, status=None):
+        """Insert or update this wallet's row in admin/wallets.xlsx (atomic write).
+        `status` overwrites the Status column; None keeps the current one."""
         if not self.wallet_data:
             return
         os.makedirs("admin", exist_ok=True)
-        filename = os.path.join("admin", "wallets.xlsx")
         wb = None
-        temp_fd = None
+        temp_path = None
         try:
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            # Load or create workbook
-            if os.path.exists(filename):
-                wb = load_workbook(filename)
-                ws = wb.active
-            else:
-                wb = Workbook()
-                ws = wb.active
-                ws.title = "Wallets"
-                # Add headers
-                headers = ["ID", "Wallet Name", "Created", "Last Access", "Address", "Balance", "Status", "Seed Phrase", "PFP Path"]
-                ws.append(headers)
-                # Style header row
-                header_fill = PatternFill(start_color="9945FF", end_color="9945FF", fill_type="solid")
-                header_font = Font(bold=True, color="FFFFFF")
-                for cell in ws[1]:
-                    cell.fill = header_fill
-                    cell.font = header_font
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
-
-            # Get new wallet ID
-            wallet_id = len([row for row in ws.iter_rows(min_row=2)]) + 1
-            seed_phrase = " ".join(self.wallet_data.get("seed", []))
-            address = self.wallet_data.get("address", "0x")
-            balance = float(self.wallet_data.get("balance", 0.0))
+            wb, ws = self._open_workbook()
+            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            address = self.wallet_data["address"]
             name = str(self.wallet_data.get("name", "My Wallet"))
-            pfp_path = str(self.wallet_data.get("pfp", ""))
+            balance = float(self.wallet_data.get("balance", 0.0))
+            pfp_path = self.wallet_data.get("pfp") or ""
 
-            # Append new wallet row
-            ws.append([
-                wallet_id,
-                name,
-                timestamp,
-                timestamp,
-                address,
-                balance,
-                status,
-                seed_phrase,
-                pfp_path
-            ])
+            for row in ws.iter_rows(min_row=2):
+                if row[4].value == address:
+                    row[1].value = name
+                    row[3].value = now
+                    row[5].value = balance
+                    if status:
+                        row[6].value = status
+                    row[8].value = pfp_path
+                    break
+            else:
+                wallet_id = ws.max_row  # header is row 1
+                encrypted_seed = self.security.encrypt_seed_phrase(self.wallet_data.get("seed", []))
+                ws.append([wallet_id, name, now, now, address, balance, status or "CREATED", encrypted_seed, pfp_path])
 
-            # Auto-adjust column widths
-            ws.column_dimensions['A'].width = 5
-            ws.column_dimensions['B'].width = 18
-            ws.column_dimensions['C'].width = 20
-            ws.column_dimensions['D'].width = 20
-            ws.column_dimensions['E'].width = 50
-            ws.column_dimensions['F'].width = 15
-            ws.column_dimensions['G'].width = 12
-            ws.column_dimensions['H'].width = 50
-            ws.column_dimensions['I'].width = 50
-
-            # Use atomic write: save to temp file first, then rename
+            # Atomic write: save to temp file first, then replace
             temp_fd, temp_path = tempfile.mkstemp(suffix=".xlsx", dir="admin")
             os.close(temp_fd)
             wb.save(temp_path)
-            if os.path.exists(filename):
-                os.remove(filename)
-            os.rename(temp_path, filename)
+            os.replace(temp_path, self.WALLETS_FILE)
+            temp_path = None
         except Exception as e:
             print(f"Error saving wallet to Excel: {e}")
         finally:
             if wb:
                 wb.close()
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
 
     # DSA Concept: Bubble Sort
     def sort_history_by_amount(self, descending=True):
@@ -787,6 +804,8 @@ class App(ctk.CTk):
         x = (self.winfo_screenwidth() // 2) - (480 // 2)
         y = (self.winfo_screenheight() // 2) - (850 // 2)
         self.geometry(f"480x850+{x}+{y}")
+
+        backend.set_scheduler(self.after)
 
         self.container = ctk.CTkFrame(self, fg_color="transparent")
         self.container.pack(fill="both", expand=True)
@@ -1185,6 +1204,10 @@ class DashboardView(ctk.CTkFrame):
 
         self.refresh()
 
+    def destroy(self):
+        backend.unsubscribe(self.refresh)
+        super().destroy()
+
     def make_btn(self, parent, txt, icon_file, col, cmd):
         f = ctk.CTkFrame(parent, fg_color="transparent")
         f.grid(row=0, column=col)
@@ -1386,18 +1409,16 @@ class SendWindow(ctk.CTkToplevel):
             if amount_float <= 0:
                 self.show_message("❌ Amount must be greater than 0", COLOR_DANGER)
                 return
+            if amount_float == float("inf") or amount_float != amount_float:
+                raise ValueError
         except ValueError:
             self.show_message("❌ Invalid amount format", COLOR_DANGER)
             return
 
         # CHECK INSUFFICIENT FUNDS BEFORE SHOWING FEE
-        metadata = COIN_METADATA.get(token, {})
-        fee = metadata.get("fee", 0)
-        total_needed = amount_float + fee
-        current_balance = backend.holdings.get(token, {}).get("amount", 0)
-
-        if current_balance < total_needed:
-            self.show_message(f"❌ Insufficient funds! You have {current_balance:.6g} {token}, need {total_needed:.6g} {token}", COLOR_DANGER)
+        error = backend.check_funds(token, amount_float)
+        if error:
+            self.show_message(error, COLOR_DANGER)
             return
 
         # Clear fee frame and rebuild with coin logo
@@ -1536,6 +1557,9 @@ class ReceiveWindow(ctk.CTkToplevel):
                                         text_color=COLOR_TEXT, placeholder_text_color=COLOR_TEXT_MUTED)
         self.amount_entry.pack(fill="x", pady=(5, 5))
 
+        self.error_lbl = ctk.CTkLabel(self, text="", text_color=COLOR_DANGER, font=FONT_SMALL)
+        self.error_lbl.pack()
+
         ctk.CTkButton(self, text="Simulate Receive", height=50, fg_color=COLOR_PRIMARY, 
                      hover_color=COLOR_PRIMARY_HOVER, text_color=COLOR_TEXT, command=self.receive_click).pack(fill="x", padx=20, pady=20)
 
@@ -1552,16 +1576,13 @@ class ReceiveWindow(ctk.CTkToplevel):
         amount_str = self.amount_entry.get()
 
         if not amount_str:
+            self.error_lbl.configure(text="❌ Please enter amount")
             return
 
-        try:
-            amount = float(amount_str)
-            if amount <= 0:
-                return
-            backend.receive_transaction(amount, token)
+        if backend.receive_transaction(amount_str, token):
             self.destroy()
-        except ValueError:
-            return
+        else:
+            self.error_lbl.configure(text="❌ Invalid amount or token")
 
 class HistoryWindow(ctk.CTkToplevel):
     def __init__(self, parent):
@@ -1589,7 +1610,12 @@ class HistoryWindow(ctk.CTkToplevel):
         # Transaction list
         self.scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self.scroll.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        backend.subscribe(self.refresh)
         self.refresh()
+
+    def destroy(self):
+        backend.unsubscribe(self.refresh)
+        super().destroy()
 
     def toggle_sort(self):
         self.sort_descending = not self.sort_descending
@@ -1597,7 +1623,7 @@ class HistoryWindow(ctk.CTkToplevel):
         self.refresh()
     
     def sort_by_time(self):
-        # Already sorted by time on creation, just refresh
+        backend.history.sort(key=lambda tx: tx["time"], reverse=True)
         self.refresh()
 
     def refresh(self):
@@ -1636,7 +1662,7 @@ class HistoryWindow(ctk.CTkToplevel):
 
             sign = "-" if tx["type"] == "send" else "+"
             ctk.CTkLabel(right, text=f"{sign}{tx['amount']:.6g}", font=("Inter", 13, "bold"), text_color=color).pack(anchor="e")
-            fee_text = f"Fee: {tx.get('fee', 0):.6g} {tx['token']}" if tx["type"] == "send" else ""
+            fee_text = f"Fee: {tx.get('fee', 0):.6g} {tx.get('fee_coin', tx['token'])}" if tx["type"] == "send" else ""
             if fee_text:
                 ctk.CTkLabel(right, text=fee_text, text_color=COLOR_TEXT_MUTED, font=("Inter", 9)).pack(anchor="e", pady=(2, 0))
 
